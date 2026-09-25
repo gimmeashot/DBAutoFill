@@ -1,0 +1,32 @@
+{
+  "name": "db-autofill",
+  "version": "0.1.0",
+  "description": "Generate safe, repeatable PostgreSQL test data from database metadata.",
+  "type": "module",
+  "bin": {
+    "db-autofill": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:integration": "vitest run src/postgres.integration.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^10.0.0",
+    "commander": "^14.0.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@10.17.1"
+}
