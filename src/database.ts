@@ -37,22 +37,30 @@ export async function inspectSchema(pool: DbPool, schema: string): Promise<Table
     pool.query<{
       table_schema: string; table_name: string; column_name: string;
       constraint_type: "PRIMARY KEY" | "UNIQUE" | "FOREIGN KEY";
+      constraint_name: string; constraint_column_count: number;
       foreign_table_schema: string | null; foreign_table_name: string | null;
       foreign_column_name: string | null;
     }>(`
       SELECT tc.table_schema, tc.table_name, kcu.column_name, tc.constraint_type,
-             ccu.table_schema AS foreign_table_schema,
-             ccu.table_name AS foreign_table_name,
-             ccu.column_name AS foreign_column_name
+             tc.constraint_name,
+             count(*) OVER (PARTITION BY tc.constraint_schema, tc.constraint_name)::int AS constraint_column_count,
+             pk.table_schema AS foreign_table_schema,
+             pk.table_name AS foreign_table_name,
+             pk.column_name AS foreign_column_name
       FROM information_schema.table_constraints tc
       JOIN information_schema.key_column_usage kcu
         ON tc.constraint_catalog = kcu.constraint_catalog
        AND tc.constraint_schema = kcu.constraint_schema
        AND tc.constraint_name = kcu.constraint_name
-      LEFT JOIN information_schema.constraint_column_usage ccu
-        ON tc.constraint_catalog = ccu.constraint_catalog
-       AND tc.constraint_schema = ccu.constraint_schema
-       AND tc.constraint_name = ccu.constraint_name
+      LEFT JOIN information_schema.referential_constraints rc
+        ON tc.constraint_catalog = rc.constraint_catalog
+       AND tc.constraint_schema = rc.constraint_schema
+       AND tc.constraint_name = rc.constraint_name
+      LEFT JOIN information_schema.key_column_usage pk
+        ON rc.unique_constraint_catalog = pk.constraint_catalog
+       AND rc.unique_constraint_schema = pk.constraint_schema
+       AND rc.unique_constraint_name = pk.constraint_name
+       AND pk.ordinal_position = kcu.position_in_unique_constraint
       WHERE tc.table_schema = $1
         AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')`, [schema]),
     pool.query<{ type_name: string; value: string }>(`
@@ -69,9 +77,10 @@ export async function inspectSchema(pool: DbPool, schema: string): Promise<Table
     const key = `${row.table_schema}.${row.table_name}.${row.column_name}`;
     const current = constraintMap.get(key) ?? { primaryKey: false, unique: false };
     if (row.constraint_type === "PRIMARY KEY") current.primaryKey = true;
-    if (row.constraint_type === "UNIQUE") current.unique = true;
+    if (row.constraint_type === "UNIQUE" && row.constraint_column_count === 1) current.unique = true;
     if (row.constraint_type === "FOREIGN KEY" && row.foreign_table_schema && row.foreign_table_name && row.foreign_column_name) {
       current.foreignKey = {
+        constraintName: row.constraint_name,
         schema: row.foreign_table_schema,
         table: row.foreign_table_name,
         column: row.foreign_column_name,
@@ -119,15 +128,18 @@ export async function loadExistingReferences(
   tables: TableSchema[],
   limit: number,
 ): Promise<Map<string, unknown[]>> {
-  const targets = new Map<string, ForeignKeySchema>();
+  const foreignGroups = new Map<string, ForeignKeySchema[]>();
+  const uniqueTargets = new Map<string, ForeignKeySchema>();
   for (const table of tables) {
     for (const column of table.columns) {
       if (column.foreignKey) {
         const foreignKey = column.foreignKey;
-        targets.set(`${foreignKey.schema}.${foreignKey.table}.${foreignKey.column}`, foreignKey);
+        const groupKey = `${tableId(table)}.${foreignKey.constraintName}`;
+        foreignGroups.set(groupKey, [...(foreignGroups.get(groupKey) ?? []), foreignKey]);
       }
       if (column.unique) {
-        targets.set(`${tableId(table)}.${column.name}`, {
+        uniqueTargets.set(`${tableId(table)}.${column.name}`, {
+          constraintName: `unique_${column.name}`,
           schema: table.schema,
           table: table.name,
           column: column.name,
@@ -137,7 +149,19 @@ export async function loadExistingReferences(
   }
 
   const references = new Map<string, unknown[]>();
-  for (const [key, target] of targets) {
+  for (const targets of foreignGroups.values()) {
+    const first = targets[0];
+    const selections = targets.map((target, index) => `${quoteIdentifier(target.column)} AS ${quoteIdentifier(`value_${index}`)}`);
+    const result = await database.query<Record<string, unknown>>(
+      `SELECT ${selections.join(", ")} FROM ${quoteIdentifier(first.schema)}.${quoteIdentifier(first.table)} LIMIT $1`,
+      [limit],
+    );
+    targets.forEach((target, index) => {
+      const key = `${target.schema}.${target.table}.${target.column}`;
+      references.set(key, result.rows.map((row) => row[`value_${index}`]));
+    });
+  }
+  for (const [key, target] of uniqueTargets) {
     const column = quoteIdentifier(target.column);
     const result = await database.query<{ value: unknown; total_count?: number }>(
       `SELECT ${column} AS value, count(*) OVER()::int AS total_count FROM ${quoteIdentifier(target.schema)}.${quoteIdentifier(target.table)} WHERE ${column} IS NOT NULL LIMIT $1`,

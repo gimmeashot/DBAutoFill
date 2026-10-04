@@ -14,24 +14,75 @@ export function createGenerationPlan(tables: TableSchema[]): GenerationPlan {
     for (const column of table.columns) {
       if (!column.foreignKey) continue;
       const parent = `${column.foreignKey.schema}.${column.foreignKey.table}`;
-      if (parent !== tableId(table) && byId.has(parent)) deps.add(parent);
+      if (byId.has(parent)) deps.add(parent);
     }
     dependencies.set(tableId(table), deps);
   }
 
-  const orderedTables: TableSchema[] = [];
-  const pending = new Set(byId.keys());
-  while (pending.size > 0) {
-    const ready = [...pending].filter((id) =>
-      [...(dependencies.get(id) ?? [])].every((dependency) => !pending.has(dependency)),
-    );
-    if (ready.length === 0) break;
-    ready.sort();
-    for (const id of ready) {
-      orderedTables.push(byId.get(id)!);
-      pending.delete(id);
+  const components = stronglyConnectedComponents([...byId.keys()], dependencies);
+  const componentByTable = new Map<string, number>();
+  components.forEach((component, index) => component.forEach((id) => componentByTable.set(id, index)));
+  const componentDependencies = components.map(() => new Set<number>());
+  for (const [id, deps] of dependencies) {
+    const source = componentByTable.get(id)!;
+    for (const dependency of deps) {
+      const target = componentByTable.get(dependency)!;
+      if (source !== target) componentDependencies[source].add(target);
     }
   }
 
-  return { orderedTables, cyclicTables: [...pending].sort() };
+  const pending = new Set(components.map((_, index) => index));
+  const orderedTables: TableSchema[] = [];
+  while (pending.size) {
+    const ready = [...pending].filter((index) => [...componentDependencies[index]].every((dependency) => !pending.has(dependency)));
+    ready.sort((a, b) => components[a][0].localeCompare(components[b][0]));
+    for (const index of ready) {
+      for (const id of [...components[index]].sort()) orderedTables.push(byId.get(id)!);
+      pending.delete(index);
+    }
+  }
+
+  const cyclicTables = components.flatMap((component) => {
+    if (component.length > 1) return component;
+    const id = component[0];
+    return dependencies.get(id)?.has(id) ? [id] : [];
+  }).sort();
+  return { orderedTables, cyclicTables };
+}
+
+function stronglyConnectedComponents(nodes: string[], edges: Map<string, Set<string>>): string[][] {
+  let nextIndex = 0;
+  const indexes = new Map<string, number>();
+  const lowLinks = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const components: string[][] = [];
+
+  const visit = (node: string): void => {
+    indexes.set(node, nextIndex);
+    lowLinks.set(node, nextIndex);
+    nextIndex += 1;
+    stack.push(node);
+    onStack.add(node);
+    for (const dependency of edges.get(node) ?? []) {
+      if (!indexes.has(dependency)) {
+        visit(dependency);
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, lowLinks.get(dependency)!));
+      } else if (onStack.has(dependency)) {
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, indexes.get(dependency)!));
+      }
+    }
+    if (lowLinks.get(node) !== indexes.get(node)) return;
+    const component: string[] = [];
+    let current: string;
+    do {
+      current = stack.pop()!;
+      onStack.delete(current);
+      component.push(current);
+    } while (current !== node);
+    components.push(component);
+  };
+
+  for (const node of nodes.sort()) if (!indexes.has(node)) visit(node);
+  return components;
 }

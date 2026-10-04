@@ -19,7 +19,7 @@ describe("data generation", () => {
 
   it("uses generated parent values for foreign keys", () => {
     const table: TableSchema = { schema: "public", name: "orders", columns: [
-      column({ name: "user_id", dataType: "integer", foreignKey: { schema: "public", table: "users", column: "id" } }),
+      column({ name: "user_id", dataType: "integer", foreignKey: { constraintName: "orders_user_fk", schema: "public", table: "users", column: "id" } }),
     ] };
     const references = new Map([["public.users.id", [10, 20]]]);
     expect(generateRows(table, 3, references)).toEqual([{ user_id: 10 }, { user_id: 20 }, { user_id: 10 }]);

@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { loadConfig, selectTables, tableConfig } from "./config.js";
 import { appendReferenceRows, createPool, inspectSchema, loadExistingReferences } from "./database.js";
-import { insertRows } from "./executor.js";
+import { assertCyclesAreNullable, backfillCyclicForeignKeys, insertRows } from "./executor.js";
 import { generateRows, seedGenerator } from "./generator.js";
 import { createGenerationPlan } from "./planner.js";
 import { createSummary, formatSummary, type TableResult } from "./report.js";
@@ -14,7 +14,7 @@ type GenerateOptions = CommonOptions & { rows?: string; seed: string; execute: b
 const program = new Command()
   .name("db-autofill")
   .description("Generate PostgreSQL test data from schema metadata")
-  .version("0.1.0");
+  .version("0.2.0");
 
 const withDatabaseOptions = (command: Command): Command => command
   .option("-c, --connection <url>", "PostgreSQL URL (or DATABASE_URL)")
@@ -34,7 +34,7 @@ withDatabaseOptions(program.command("plan").description("Print table insertion o
     const plan = createGenerationPlan(selectTables(await inspectSchema(pool, options.schema ?? config.schema ?? "public"), config));
     console.log("Insertion order:");
     plan.orderedTables.forEach((table, index) => console.log(`${index + 1}. ${tableId(table)}`));
-    if (plan.cyclicTables.length) console.log(`Unsupported cycles: ${plan.cyclicTables.join(", ")}`);
+    if (plan.cyclicTables.length) console.log(`Cyclic tables (nullable links will be backfilled): ${plan.cyclicTables.join(", ")}`);
   }));
 
 withDatabaseOptions(program.command("generate").description("Preview or insert generated rows")
@@ -50,7 +50,7 @@ withDatabaseOptions(program.command("generate").description("Preview or insert g
     const schema = options.schema ?? config.schema ?? "public";
     const inspected = await inspectSchema(pool, schema);
     const plan = createGenerationPlan(selectTables(inspected, config, options.tables));
-    if (plan.cyclicTables.length) throw new Error(`Cyclic foreign keys are not supported yet: ${plan.cyclicTables.join(", ")}`);
+    assertCyclesAreNullable(plan.orderedTables, plan.cyclicTables);
 
     if (!options.execute) {
       const references = previewReferences(inspected, defaultCount);
@@ -67,6 +67,7 @@ withDatabaseOptions(program.command("generate").description("Preview or insert g
 
     const client = await pool.connect();
     const results: TableResult[] = [];
+    const insertedByTable = new Map<string, Record<string, unknown>[]>();
     try {
       await client.query("BEGIN");
       const references = await loadExistingReferences(client as never, plan.orderedTables, defaultCount);
@@ -75,10 +76,13 @@ withDatabaseOptions(program.command("generate").description("Preview or insert g
         const count = options.rows ? defaultCount : current.rows ?? defaultCount;
         const rows = generateRows(table, count, references, current.columns);
         const inserted = await insertRows(client, table, rows);
+        insertedByTable.set(tableId(table), inserted);
         appendReferenceRows(references, table, inserted);
         results.push({ table: tableId(table), rows: inserted.length });
         console.log(`${tableId(table)}: inserted ${inserted.length}`);
       }
+      const backfilled = await backfillCyclicForeignKeys(client, plan.orderedTables, plan.cyclicTables, insertedByTable);
+      if (backfilled > 0) console.log(`Cyclic relationships backfilled: ${backfilled}`);
       await client.query("COMMIT");
       console.log(formatSummary(createSummary("execute", results, startedAt)));
     } catch (error) {

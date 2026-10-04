@@ -1,4 +1,5 @@
 export interface ForeignKeySchema {
+  constraintName: string;
   schema: string;
   table: string;
   column: string;

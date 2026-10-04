@@ -12,14 +12,15 @@ describe("database helpers", () => {
   it("escapes identifiers", () => expect(quoteIdentifier('odd"name')).toBe('"odd""name"'));
 
   it("loads distinct foreign-key targets once", async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [{ value: 3 }, { value: 5 }] });
+    const query = vi.fn().mockResolvedValue({ rows: [{ value_0: 3, value_1: 30 }, { value_0: 5, value_1: 50 }] });
     const orders: TableSchema = { schema: "public", name: "orders", columns: [
-      column({ name: "buyer_id", foreignKey: { schema: "public", table: "users", column: "id" } }),
-      column({ name: "seller_id", foreignKey: { schema: "public", table: "users", column: "id" } }),
+      column({ name: "buyer_id", foreignKey: { constraintName: "orders_users_fk", schema: "public", table: "users", column: "id" } }),
+      column({ name: "seller_id", foreignKey: { constraintName: "orders_users_fk", schema: "public", table: "users", column: "tenant_id" } }),
     ] };
     const references = await loadExistingReferences({ query } as never, [orders], 10);
     expect(query).toHaveBeenCalledOnce();
     expect(references.get("public.users.id")).toEqual([3, 5]);
+    expect(references.get("public.users.tenant_id")).toEqual([30, 50]);
   });
 
   it("appends values returned by inserts", () => {
